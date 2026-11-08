@@ -10,132 +10,63 @@ import {
   Timer,
   ArrowRight,
   RefreshCw,
+  Users,
+  Inbox,
 } from 'lucide-react';
 
-// ---- Fixed demo data (do not change their meaning) ----
-const NOW = 540; // 09:00
-const EXISTING_BOOKINGS: ReadonlyArray<readonly [number, number]> = [
-  [600, 660], // 10:00 - 11:00
-];
+import {
+  TIME_LIMITS,
+  checkAvailability,
+  fmtRange,
+  fmtTime,
+  pad2,
+  parseMin,
+  type Result,
+} from './availability';
+import { ROOMS, type Booking } from './data/rooms';
+import { filterRooms } from './filters';
 
-const DAY_MIN = 1440;
-const MAX_DURATION = 120;
+const { now: NOW, dayMinutes: DAY_MIN } = TIME_LIMITS;
 
-type Min = number;
+// Every equipment item that appears in the catalog, for the checkboxes.
+const EQUIPMENT_OPTIONS: readonly string[] = [
+  ...new Set(ROOMS.flatMap((r) => r.equipment)),
+].sort();
 
-type Result =
-  | { kind: 'available' }
-  | { kind: 'unavailable'; reason: string }
-  | { kind: 'error'; reasons: string[] };
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
-// ---- helpers ----
-const pad2 = (n: number) => n.toString().padStart(2, '0');
-
-const fmtTime = (m: number): string => {
-  const mm = ((m % DAY_MIN) + DAY_MIN) % DAY_MIN;
-  const h = Math.floor(mm / 60);
-  const min = mm % 60;
-  const period = h < 12 ? 'AM' : 'PM';
-  const h12 = h % 12 === 0 ? 12 : h % 12;
-  return `${h12}:${pad2(min)} ${period}`;
+// Attendees: a whole number, at least 1. Anything else => null.
+const parseAttendees = (raw: string): number | null => {
+  const n = parseMin(raw); // same whole-number parsing as the time fields
+  return n !== null && n >= 1 ? n : null;
 };
 
-const fmtRange = (s: number, e: number) => `${fmtTime(s)} – ${fmtTime(e)}`;
-
-const intervalsOverlap = (
-  a: readonly [number, number],
-  b: readonly [number, number]
-): boolean => {
-  // Touching at an endpoint is NOT overlap.
-  return a[0] < b[1] && b[0] < a[1];
-};
-
-// Parse a text field into an integer or null (non-integer / empty => null)
-const parseMin = (raw: string): number | null => {
-  const trimmed = raw.trim();
-  if (trimmed === '') return null;
-  if (!/^-?\d+$/.test(trimmed)) return null; // non-integer (decimals, letters)
-  return Number(trimmed);
-};
-
-// ---- core availability logic ----
-export function checkAvailability(
-  startRaw: string,
-  endRaw: string,
-  blocked: boolean
-): Result {
-  const errors: string[] = [];
-
-  if (startRaw.trim() === '') errors.push('Start time is required.');
-  if (endRaw.trim() === '') errors.push('End time is required.');
-
-  if (errors.length) return { kind: 'error', reasons: errors };
-
-  const start = parseMin(startRaw);
-  const end = parseMin(endRaw);
-
-  if (start === null) errors.push('Start time must be a whole number (minutes after midnight).');
-  if (end === null) errors.push('End time must be a whole number (minutes after midnight).');
-
-  if (errors.length) return { kind: 'error', reasons: errors };
-
-  // AC1
-  if (start < 0 || start >= DAY_MIN)
-    errors.push('Start time must be between 0 and 1439.');
-  if (end < 1 || end > DAY_MIN)
-    errors.push('End time must be between 1 and 1440.');
-  if (errors.length) return { kind: 'error', reasons: errors };
-
-  if (start >= end) {
-    errors.push('Start time must be earlier than end time.');
-    return { kind: 'error', reasons: errors };
-  }
-
-  // AC1: start must be strictly later than now
-  if (start <= NOW) {
-    errors.push(`Start time must be later than the current time (${fmtTime(NOW)}).`);
-    return { kind: 'error', reasons: errors };
-  }
-
-  // AC2: duration <= 120
-  const duration = end - start;
-  if (duration > MAX_DURATION) {
-    errors.push(
-      `Booking length is ${duration} minutes. Maximum allowed is ${MAX_DURATION} minutes.`
-    );
-    return { kind: 'error', reasons: errors };
-  }
-
-  // AC3: blocked room is always unavailable
-  if (blocked) {
-    return {
-      kind: 'unavailable',
-      reason: 'This room is currently marked as blocked and cannot be booked.',
-    };
-  }
-
-  // AC4: reject overlap (touching endpoints allowed)
-  const request: [number, number] = [start, end];
-  for (const b of EXISTING_BOOKINGS) {
-    if (intervalsOverlap(request, b)) {
-      return {
-        kind: 'unavailable',
-        reason: `Overlaps an existing booking (${fmtRange(b[0], b[1])}).`,
-      };
-    }
-  }
-
-  // AC5: available
-  return { kind: 'available' };
+// All user inputs in one place, so one handler can update any of them.
+interface FormState {
+  startRaw: string;
+  endRaw: string;
+  attendeesRaw: string;
+  equipment: readonly string[];
+  roomId: string | null;
 }
+
+const EMPTY_FORM: FormState = {
+  startRaw: '',
+  endRaw: '',
+  attendeesRaw: '1',
+  equipment: [],
+  roomId: null,
+};
 
 // ---- visual timeline ----
 function Timeline({
+  bookings,
   start,
   end,
   blocked,
   resultKind,
 }: {
+  bookings: readonly Booking[];
   start: number | null;
   end: number | null;
   blocked: boolean;
@@ -171,13 +102,12 @@ function Timeline({
         </div>
 
         {/* existing bookings */}
-        {EXISTING_BOOKINGS.map((b, i) => {
-          const widthPct = ((b[1] - b[0]) / DAY_MIN) * 100;
-          const leftPct = (b[0] / DAY_MIN) * 100;
-          const label = fmtRange(b[0], b[1]);
+        {bookings.map((b, i) => {
+          const widthPct = ((b.end - b.start) / DAY_MIN) * 100;
+          const label = fmtRange(b.start, b.end);
           const fitsInside = widthPct > 22;
           return (
-            <div key={i} className="absolute z-10" style={{ left: pct(b[0]) }}>
+            <div key={i} className="absolute z-10" style={{ left: pct(b.start) }}>
               <div
                 className="absolute top-6 bottom-6 rounded-md bg-slate-300 border border-slate-400"
                 style={{ width: `${widthPct}%` }}
@@ -252,36 +182,55 @@ function Timeline({
 }
 
 export default function App() {
-  const [startRaw, setStartRaw] = useState('');
-  const [endRaw, setEndRaw] = useState('');
-  const [blocked, setBlocked] = useState(false);
-  const [result, setResult] = useState<Result | null>(null);
+  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  // Becomes true on "Check Availability". While true, the result is recalculated
+  // from the current inputs on every change, so it can never be stale (F5).
+  const [checked, setChecked] = useState(false);
 
-  const startMin = parseMin(startRaw);
-  const endMin = parseMin(endRaw);
+  // The one handler for every input change.
+  const update = (patch: Partial<FormState>) => setForm((f) => ({ ...f, ...patch }));
+
+  const startMin = parseMin(form.startRaw);
+  const endMin = parseMin(form.endRaw);
+  const attendees = parseAttendees(form.attendeesRaw);
+
+  // F1 + F2: only rooms that fit. Blocked rooms stay listed but can never be available (F3).
+  const matchingRooms = useMemo(
+    () =>
+      attendees === null ? [] : filterRooms(ROOMS, { attendees, equipment: form.equipment }),
+    [attendees, form.equipment]
+  );
+
+  // A selection that no longer passes the filters is dropped automatically.
+  const selectedRoom = matchingRooms.find((r) => r.id === form.roomId) ?? null;
+
+  const result: Result | null = useMemo(() => {
+    if (!checked) return null;
+    if (attendees === null) {
+      return { kind: 'error', reasons: ['Attendees must be a whole number of at least 1.'] };
+    }
+    if (selectedRoom === null) {
+      return { kind: 'error', reasons: ['Select a room from the list first.'] };
+    }
+    // Old time and overlap rules; a blocked room always returns "unavailable".
+    return checkAvailability({ startRaw: form.startRaw, endRaw: form.endRaw }, selectedRoom);
+  }, [checked, attendees, selectedRoom, form.startRaw, form.endRaw]);
 
   const resultKind: 'available' | 'unavailable' | 'error' | 'idle' =
-    result === null
-      ? 'idle'
-      : result.kind === 'error'
-        ? 'error'
-        : result.kind;
+    result === null ? 'idle' : result.kind;
 
-  const handleCheck = () => {
-    setResult(checkAvailability(startRaw, endRaw, blocked));
-  };
+  const toggleEquipment = (item: string) =>
+    update({
+      equipment: form.equipment.includes(item)
+        ? form.equipment.filter((e) => e !== item)
+        : [...form.equipment, item],
+    });
+
+  const handleCheck = () => setChecked(true);
 
   const handleReset = () => {
-    setStartRaw('');
-    setEndRaw('');
-    setBlocked(false);
-    setResult(null);
-  };
-
-  const quickFill = (s: number, e: number) => {
-    setStartRaw(String(s));
-    setEndRaw(String(e));
-    setResult(null);
+    setForm(EMPTY_FORM);
+    setChecked(false);
   };
 
   const quickOptions = useMemo(
@@ -307,20 +256,173 @@ export default function App() {
                 Smart Campus Room Availability Checker
               </h1>
               <p className="text-sm text-slate-500">
-                Room <span className="font-semibold text-slate-700">B-204 · Engineering Block</span>
+                Room{' '}
+                <span className="font-semibold text-slate-700">
+                  {selectedRoom ? selectedRoom.name : 'none selected'}
+                </span>
               </p>
             </div>
           </div>
           <p className="text-sm text-slate-500 leading-relaxed">
-            Check whether a room is free for a requested time window. This tool
-            only checks availability — it never creates or confirms a booking.
+            Find a room that fits your group, then check whether it is free for a
+            requested time window. This tool only checks availability — it never
+            creates or confirms a booking.
           </p>
         </header>
 
-        {/* Demo data panel */}
+        {/* Room finder */}
         <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-4">
-            Demo Data
+            Find a Room
+          </h2>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label
+                htmlFor="attendees-input"
+                className="block text-sm font-medium text-slate-700 mb-1"
+              >
+                Attendees
+              </label>
+              <div className="relative">
+                <input
+                  id="attendees-input"
+                  type="number"
+                  inputMode="numeric"
+                  min={1}
+                  value={form.attendeesRaw}
+                  onChange={(e) => update({ attendeesRaw: e.target.value })}
+                  placeholder="e.g. 8"
+                  className="w-full rounded-xl border border-slate-300 px-3 py-2.5 text-base text-slate-900 placeholder-slate-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30 focus:outline-none transition"
+                />
+                <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">
+                  people
+                </span>
+              </div>
+              {attendees === null && (
+                <p className="mt-1 text-xs text-amber-600">
+                  Enter a whole number of 1 or more.
+                </p>
+              )}
+            </div>
+
+            <fieldset>
+              <legend className="block text-sm font-medium text-slate-700 mb-1">
+                Required equipment
+              </legend>
+              <div className="flex flex-wrap gap-2">
+                {EQUIPMENT_OPTIONS.map((item) => {
+                  const on = form.equipment.includes(item);
+                  return (
+                    <label
+                      key={item}
+                      className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm cursor-pointer transition ${
+                        on
+                          ? 'border-sky-300 bg-sky-50 text-sky-800'
+                          : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={() => toggleEquipment(item)}
+                        className="h-4 w-4 accent-sky-600"
+                      />
+                      {capitalize(item)}
+                    </label>
+                  );
+                })}
+              </div>
+              <p className="mt-1 text-[11px] text-slate-400">
+                Rooms must have all selected items.
+              </p>
+            </fieldset>
+          </div>
+
+          {/* matching rooms */}
+          <div className="mt-5">
+            {attendees === null ? null : matchingRooms.length === 0 ? (
+              // F4: clear empty state
+              <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-5 text-center">
+                <Inbox className="mx-auto h-6 w-6 text-slate-400" />
+                <p className="mt-2 text-sm font-semibold text-slate-700">
+                  No rooms match your filters
+                </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  No room seats {attendees} {attendees === 1 ? 'person' : 'people'}
+                  {form.equipment.length > 0 &&
+                    ` with ${form.equipment.map(capitalize).join(' + ')}`}
+                  . Try fewer attendees or less equipment.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => update({ attendeesRaw: '1', equipment: [] })}
+                  className="mt-3 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-600 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700 transition"
+                >
+                  Clear filters
+                </button>
+              </div>
+            ) : (
+              <>
+                <p className="text-[11px] text-slate-400 mb-2">
+                  {matchingRooms.length} of {ROOMS.length} rooms match. Select one:
+                </p>
+                <div
+                  role="radiogroup"
+                  aria-label="Matching rooms"
+                  className="grid grid-cols-1 sm:grid-cols-2 gap-2"
+                >
+                  {matchingRooms.map((room) => {
+                    const selected = room.id === selectedRoom?.id;
+                    return (
+                      <label
+                        key={room.id}
+                        className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 transition ${
+                          selected
+                            ? 'border-sky-500 bg-sky-50 ring-2 ring-sky-500/30'
+                            : 'border-slate-200 bg-white hover:border-sky-300'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="room"
+                          value={room.id}
+                          checked={selected}
+                          onChange={() => update({ roomId: room.id })}
+                          className="mt-1 h-4 w-4 accent-sky-600"
+                        />
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-semibold text-slate-800">
+                              {room.name}
+                            </span>
+                            {room.blocked && (
+                              <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-rose-600">
+                                Blocked
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-0.5 flex items-center gap-1 text-xs text-slate-500">
+                            <Users className="h-3.5 w-3.5" /> {room.capacity} seats
+                            <span className="text-slate-300">·</span>
+                            {room.equipment.length > 0
+                              ? room.equipment.map(capitalize).join(', ')
+                              : 'No equipment'}
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+        </section>
+
+        {/* Selected room panel */}
+        <section className="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-4">
+            Selected Room
           </h2>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="rounded-xl bg-amber-50 border border-amber-200 p-3">
@@ -340,62 +442,67 @@ export default function App() {
                 <span className="text-xs font-semibold uppercase tracking-wide">Bookings</span>
               </div>
               <div className="text-sm font-bold text-slate-800">
-                {EXISTING_BOOKINGS.map((b, i) => (
-                  <div key={i}>{fmtRange(b[0], b[1])}</div>
-                ))}
+                {selectedRoom === null ? (
+                  <span className="font-medium text-slate-400">Select a room</span>
+                ) : selectedRoom.bookings.length === 0 ? (
+                  <span className="font-medium text-slate-500">None today</span>
+                ) : (
+                  selectedRoom.bookings.map((b, i) => (
+                    <div key={i}>{fmtRange(b.start, b.end)}</div>
+                  ))
+                )}
               </div>
-              <div className="text-xs text-slate-500">
-                {EXISTING_BOOKINGS.map((b) => `(${b[0]}, ${b[1]})`).join(', ')}
-              </div>
+              {selectedRoom !== null && selectedRoom.bookings.length > 0 && (
+                <div className="text-xs text-slate-500">
+                  {selectedRoom.bookings.map((b) => `(${b.start}, ${b.end})`).join(', ')}
+                </div>
+              )}
             </div>
 
-            <div
-              className={`rounded-xl border p-3 transition-colors ${
-                blocked
-                  ? 'bg-rose-50 border-rose-200'
-                  : 'bg-emerald-50 border-emerald-200'
-              }`}
-            >
-              <div className="flex items-center justify-between mb-1">
-                <div
-                  className={`flex items-center gap-2 ${
-                    blocked ? 'text-rose-700' : 'text-emerald-700'
-                  }`}
-                >
-                  {blocked ? <Ban className="h-4 w-4" /> : <CheckCircle2 className="h-4 w-4" />}
+            {selectedRoom === null ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                <div className="flex items-center gap-2 text-slate-500 mb-1">
+                  <DoorClosed className="h-4 w-4" />
                   <span className="text-xs font-semibold uppercase tracking-wide">
                     Room Status
                   </span>
                 </div>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={blocked}
-                  onClick={() => {
-                    setBlocked((v) => !v);
-                    setResult(null);
-                  }}
-                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 ${
-                    blocked ? 'bg-rose-500' : 'bg-emerald-500'
-                  }`}
-                  aria-label="Toggle room blocked state"
-                >
-                  <span
-                    className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
-                      blocked ? 'translate-x-5' : 'translate-x-0.5'
-                    }`}
-                  />
-                </button>
+                <div className="text-sm font-medium text-slate-400">Select a room</div>
               </div>
+            ) : (
               <div
-                className={`text-sm font-bold ${
-                  blocked ? 'text-rose-900' : 'text-emerald-900'
+                className={`rounded-xl border p-3 transition-colors ${
+                  selectedRoom.blocked
+                    ? 'bg-rose-50 border-rose-200'
+                    : 'bg-emerald-50 border-emerald-200'
                 }`}
               >
-                {blocked ? 'Blocked' : 'Open'}
+                <div
+                  className={`flex items-center gap-2 mb-1 ${
+                    selectedRoom.blocked ? 'text-rose-700' : 'text-emerald-700'
+                  }`}
+                >
+                  {selectedRoom.blocked ? (
+                    <Ban className="h-4 w-4" />
+                  ) : (
+                    <CheckCircle2 className="h-4 w-4" />
+                  )}
+                  <span className="text-xs font-semibold uppercase tracking-wide">
+                    Room Status
+                  </span>
+                </div>
+                <div
+                  className={`text-sm font-bold ${
+                    selectedRoom.blocked ? 'text-rose-900' : 'text-emerald-900'
+                  }`}
+                >
+                  {selectedRoom.blocked ? 'Blocked' : 'Open'}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {selectedRoom.capacity} seats
+                </div>
               </div>
-              <div className="text-xs text-slate-500">Tap to simulate</div>
-            </div>
+            )}
           </div>
         </section>
 
@@ -405,9 +512,10 @@ export default function App() {
             Today's Timeline
           </h2>
           <Timeline
+            bookings={selectedRoom?.bookings ?? []}
             start={startMin}
             end={endMin}
-            blocked={blocked}
+            blocked={selectedRoom?.blocked ?? false}
             resultKind={resultKind}
           />
           <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-slate-500">
@@ -450,11 +558,8 @@ export default function App() {
                   id="start-input"
                   type="number"
                   inputMode="numeric"
-                  value={startRaw}
-                  onChange={(e) => {
-                    setStartRaw(e.target.value);
-                    setResult(null);
-                  }}
+                  value={form.startRaw}
+                  onChange={(e) => update({ startRaw: e.target.value })}
                   placeholder="e.g. 600"
                   className="w-full rounded-xl border border-slate-300 px-3 py-2.5 text-base text-slate-900 placeholder-slate-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30 focus:outline-none transition"
                 />
@@ -464,20 +569,20 @@ export default function App() {
               </div>
               {startMin !== null && (
                 <p className="mt-1 text-xs text-slate-500">
-                  {startMin >= 0 && startMin <= DAY_MIN ? (
+                  {startMin >= TIME_LIMITS.startMin && startMin <= TIME_LIMITS.startMax ? (
                     <>
                       <span className="font-semibold text-slate-700">{startMin} min</span>{' '}
                       = {fmtTime(startMin)}
                     </>
                   ) : (
                     <span className="text-amber-600">
-                      {startMin} min is outside 0–1439
+                      {startMin} min is outside {TIME_LIMITS.startMin}–{TIME_LIMITS.startMax}
                     </span>
                   )}
                 </p>
               )}
               <p className="mt-1 text-[11px] text-slate-400">
-                Minutes after midnight (0–1439)
+                Minutes after midnight ({TIME_LIMITS.startMin}–{TIME_LIMITS.startMax})
               </p>
             </div>
 
@@ -493,11 +598,8 @@ export default function App() {
                   id="end-input"
                   type="number"
                   inputMode="numeric"
-                  value={endRaw}
-                  onChange={(e) => {
-                    setEndRaw(e.target.value);
-                    setResult(null);
-                  }}
+                  value={form.endRaw}
+                  onChange={(e) => update({ endRaw: e.target.value })}
                   placeholder="e.g. 720"
                   className="w-full rounded-xl border border-slate-300 px-3 py-2.5 text-base text-slate-900 placeholder-slate-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30 focus:outline-none transition"
                 />
@@ -507,20 +609,20 @@ export default function App() {
               </div>
               {endMin !== null && (
                 <p className="mt-1 text-xs text-slate-500">
-                  {endMin >= 0 && endMin <= DAY_MIN ? (
+                  {endMin >= TIME_LIMITS.endMin && endMin <= TIME_LIMITS.endMax ? (
                     <>
                       <span className="font-semibold text-slate-700">{endMin} min</span>{' '}
                       = {fmtTime(endMin)}
                     </>
                   ) : (
                     <span className="text-amber-600">
-                      {endMin} min is outside 1–1440
+                      {endMin} min is outside {TIME_LIMITS.endMin}–{TIME_LIMITS.endMax}
                     </span>
                   )}
                 </p>
               )}
               <p className="mt-1 text-[11px] text-slate-400">
-                Minutes after midnight (1–1440)
+                Minutes after midnight ({TIME_LIMITS.endMin}–{TIME_LIMITS.endMax})
               </p>
             </div>
           </div>
@@ -533,7 +635,7 @@ export default function App() {
                 <button
                   key={o.label}
                   type="button"
-                  onClick={() => quickFill(o.s, o.e)}
+                  onClick={() => update({ startRaw: String(o.s), endRaw: String(o.e) })}
                   className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700 transition"
                 >
                   {o.label}
@@ -565,27 +667,29 @@ export default function App() {
 
         {/* Result */}
         {result && (
-          <section className="mb-6 animate-[fadeIn_0.2s_ease-out]">
-            {result.kind === 'available' && (
-              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5">
-                <div className="flex items-start gap-3">
-                  <CheckCircle2 className="h-6 w-6 text-emerald-600 shrink-0 mt-0.5" />
-                  <div>
-                    <h3 className="text-base font-bold text-emerald-900">
-                      Available
-                    </h3>
-                    <p className="text-sm text-emerald-800 mt-1">
-                      The room is free for{' '}
-                      <span className="font-semibold">
-                        {fmtRange(startMin!, endMin!)}
-                      </span>{' '}
-                      ({endMin! - startMin!} min). No existing bookings overlap
-                      this window.
-                    </p>
+          <section className="mb-6 animate-[fadeIn_0.2s_ease-out]" aria-live="polite">
+            {result.kind === 'available' &&
+              selectedRoom !== null &&
+              startMin !== null &&
+              endMin !== null && (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-5">
+                  <div className="flex items-start gap-3">
+                    <CheckCircle2 className="h-6 w-6 text-emerald-600 shrink-0 mt-0.5" />
+                    <div>
+                      <h3 className="text-base font-bold text-emerald-900">
+                        Available
+                      </h3>
+                      <p className="text-sm text-emerald-800 mt-1">
+                        <span className="font-semibold">{selectedRoom.name}</span> is free
+                        for{' '}
+                        <span className="font-semibold">{fmtRange(startMin, endMin)}</span>{' '}
+                        ({endMin - startMin} min). No existing bookings overlap this
+                        window.
+                      </p>
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
 
             {result.kind === 'unavailable' && (
               <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5">
@@ -633,8 +737,16 @@ export default function App() {
             <Timer className="h-3.5 w-3.5" /> Rules
           </h2>
           <ul className="space-y-2 text-sm text-slate-600">
-            <li>• Start must be later than now ({fmtTime(NOW)}) and before end; within 0–1440.</li>
-            <li>• Length must be 120 minutes or fewer (exactly 120 is allowed).</li>
+            <li>• Only rooms that seat all attendees and have all selected equipment are listed.</li>
+            <li>
+              • Start must be later than now ({fmtTime(NOW)}) and before end; start{' '}
+              {TIME_LIMITS.startMin}–{TIME_LIMITS.startMax}, end {TIME_LIMITS.endMin}–
+              {TIME_LIMITS.endMax}.
+            </li>
+            <li>
+              • Length must be {TIME_LIMITS.maxDuration} minutes or fewer (exactly{' '}
+              {TIME_LIMITS.maxDuration} is allowed).
+            </li>
             <li>• A blocked room is always unavailable.</li>
             <li>• Touching endpoints don't count as overlap (e.g. ends 11:00, starts 11:00 = OK).</li>
             <li>• This tool never creates or modifies bookings.</li>
