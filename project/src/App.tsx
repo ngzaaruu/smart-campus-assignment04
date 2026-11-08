@@ -16,7 +16,7 @@ import {
 
 import {
   TIME_LIMITS,
-  checkAvailability,
+  checkAvailability as checkRoomAvailability,
   fmtRange,
   fmtTime,
   pad2,
@@ -27,6 +27,18 @@ import { ROOMS, type Booking } from './data/rooms';
 import { filterRooms } from './filters';
 
 const { now: NOW, dayMinutes: DAY_MIN } = TIME_LIMITS;
+
+const LEGACY_DEMO_ROOM = ROOMS.find((room) => room.id === 'b-204');
+
+// Keep the original three-argument API used by existing consumers and tests.
+// eslint-disable-next-line react-refresh/only-export-components
+export function checkAvailability(startRaw: string, endRaw: string, blocked: boolean): Result {
+  if (!LEGACY_DEMO_ROOM) throw new Error('Room b-204 is missing from ROOMS');
+  return checkRoomAvailability(
+    { startRaw, endRaw },
+    { bookings: LEGACY_DEMO_ROOM.bookings, blocked }
+  );
+}
 
 // Every equipment item that appears in the catalog, for the checkboxes.
 const EQUIPMENT_OPTIONS: readonly string[] = [
@@ -213,7 +225,10 @@ export default function App() {
       return { kind: 'error', reasons: ['Select a room from the list first.'] };
     }
     // Old time and overlap rules; a blocked room always returns "unavailable".
-    return checkAvailability({ startRaw: form.startRaw, endRaw: form.endRaw }, selectedRoom);
+    return checkRoomAvailability(
+      { startRaw: form.startRaw, endRaw: form.endRaw },
+      selectedRoom
+    );
   }, [checked, attendees, selectedRoom, form.startRaw, form.endRaw]);
 
   const resultKind: 'available' | 'unavailable' | 'error' | 'idle' =
