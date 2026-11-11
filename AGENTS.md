@@ -39,7 +39,7 @@ Stack: React + Vite + TypeScript, tests with Vitest.
 - Do not fix unrelated problems; change only what the current task asks.
 
 ## Commands
-- Run all commands from the project/ folder (cd project).
+- Run all commands from the repository root.
 - Tests: npm test
 - Type check: npm run typecheck
 - Lint: npm run lint
