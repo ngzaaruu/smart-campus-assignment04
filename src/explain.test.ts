@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canExplain,
   deriveReasonCode,
   explainAvailability,
   mockFallbackExplanation,
@@ -63,6 +64,31 @@ describe('deriveReasonCode: reads the authoritative Result only', () => {
   it('returns null for unknown reasons instead of guessing', () => {
     expect(deriveReasonCode({ kind: 'unavailable', reason: 'Something else happened.' })).toBeNull();
     expect(deriveReasonCode({ kind: 'error', reasons: ['Unknown failure.'] })).toBeNull();
+  });
+});
+
+describe('canExplain: only decided results are explainable', () => {
+  it('allows explaining available and unavailable results', () => {
+    expect(canExplain({ kind: 'available' })).toBe(true);
+    expect(
+      canExplain({
+        kind: 'unavailable',
+        reason: 'This room is currently marked as blocked and cannot be booked.',
+      })
+    ).toBe(true);
+  });
+
+  it('forbids explaining error results (validation problems)', () => {
+    expect(canExplain({ kind: 'error', reasons: ['Start time is required.'] })).toBe(false);
+    expect(
+      canExplain({ kind: 'error', reasons: ['Start time must be earlier than end time.'] })
+    ).toBe(false);
+    expect(
+      canExplain({ kind: 'error', reasons: ['Start time must be between 0 and 1439.'] })
+    ).toBe(false);
+    expect(
+      canExplain({ kind: 'error', reasons: ['Attendees must be a whole number of at least 1.'] })
+    ).toBe(false);
   });
 });
 

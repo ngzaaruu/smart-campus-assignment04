@@ -29,6 +29,7 @@ import { ROOMS, type Booking } from './data/rooms';
 import { sanitizeTimeInput } from './inputFormat';
 import { filterRooms } from './filters';
 import {
+  canExplain,
   deriveReasonCode,
   explainAvailability,
 } from './explain';
@@ -784,8 +785,10 @@ export default function App() {
           </section>
         )}
 
-        {/* MOCK AI explanation */}
-        {result && derivedReason !== null && (
+        {/* MOCK AI explanation — only for a decided available/unavailable result;
+            error results (empty, reversed or out-of-range times) have nothing
+            to explain, so the button and box are hidden. */}
+        {result && canExplain(result) && derivedReason !== null && (
           <section className="mb-6">
             <button
               type="button"

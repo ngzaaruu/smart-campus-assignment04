@@ -40,6 +40,13 @@ const MINUTES_IN_DAY = 1440;
 
 export const mockFallbackExplanation = FALLBACK_EXPLANATION;
 
+// Explain is offered only for a decided availability result. Error results
+// (empty, reversed or out-of-range times, etc.) have nothing to explain:
+// the user must fix the input first.
+export function canExplain(result: Result): boolean {
+  return result.kind === 'available' || result.kind === 'unavailable';
+}
+
 // Derives the reason code from an authoritative checker Result.
 // This helper ONLY reads the result; the checker stays untouched.
 export function deriveReasonCode(result: Result): {
