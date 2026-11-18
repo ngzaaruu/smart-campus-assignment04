@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   DoorClosed,
   Clock,
@@ -12,6 +12,8 @@ import {
   RefreshCw,
   Users,
   Inbox,
+  Sparkles,
+  Loader2,
 } from 'lucide-react';
 
 import {
@@ -25,6 +27,10 @@ import {
 } from './availability';
 import { ROOMS, type Booking } from './data/rooms';
 import { filterRooms } from './filters';
+import {
+  deriveReasonCode,
+  explainAvailability,
+} from './explain';
 
 const { now: NOW, dayMinutes: DAY_MIN } = TIME_LIMITS;
 
@@ -233,6 +239,37 @@ export default function App() {
 
   const resultKind: 'available' | 'unavailable' | 'error' | 'idle' =
     result === null ? 'idle' : result.kind;
+
+  // MOCK "Explain availability" feature state. The explanation is never shown
+  // together with a stale result: any input change clears it.
+  const [explanation, setExplanation] = useState<string | null>(null);
+  const [explanationState, setExplanationState] = useState<'idle' | 'loading' | 'done'>('idle');
+
+  const derivedReason = result === null ? null : deriveReasonCode(result);
+
+  const explanationRequestId = useMemo(
+    () => JSON.stringify([form, checked, result]),
+    [form, checked, result]
+  );
+
+  useEffect(() => {
+    setExplanation(null);
+    setExplanationState('idle');
+  }, [explanationRequestId]);
+
+  const handleExplain = async () => {
+    if (result === null || derivedReason === null || selectedRoom === null) return;
+    setExplanationState('loading');
+    const out = await explainAvailability({
+      roomLabel: selectedRoom.name,
+      start: startMin ?? 0,
+      end: endMin ?? 1,
+      isAvailable: derivedReason.isAvailable,
+      reasonCode: derivedReason.reasonCode,
+    });
+    setExplanation(out.explanation);
+    setExplanationState('done');
+  };
 
   const toggleEquipment = (item: string) =>
     update({
@@ -739,6 +776,53 @@ export default function App() {
                         </li>
                       ))}
                     </ul>
+                  </div>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* MOCK AI explanation */}
+        {result && derivedReason !== null && (
+          <section className="mb-6">
+            <button
+              type="button"
+              onClick={handleExplain}
+              disabled={explanationState === 'loading'}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 shadow-sm hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700 disabled:opacity-60 disabled:cursor-wait transition"
+            >
+              {explanationState === 'loading' ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Generating explanation…
+                </>
+              ) : (
+                <>
+                  <Sparkles className="h-4 w-4" />
+                  Explain availability
+                </>
+              )}
+            </button>
+
+            {explanation !== null && (
+              <div
+                className="mt-3 rounded-2xl border border-dashed border-violet-300 bg-violet-50 p-5 animate-[fadeIn_0.2s_ease-out]"
+                data-testid="explanation-box"
+              >
+                <div className="flex items-start gap-3">
+                  <Sparkles className="h-5 w-5 text-violet-500 shrink-0 mt-0.5" />
+                  <div>
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-violet-600">
+                      AI-generated explanation (mock)
+                    </h3>
+                    <p className="text-sm text-violet-900/90 mt-1 leading-relaxed">
+                      {explanation}
+                    </p>
+                    <p className="mt-2 text-[11px] text-violet-500">
+                      Demo only — generated locally from the result above. The confirmed status
+                      is authoritative.
+                    </p>
                   </div>
                 </div>
               </div>
